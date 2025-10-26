@@ -244,9 +244,9 @@ function drawSpectrogram(ctx, specData, sr, n_fft, alpha, dyn_range, colormap) {
             const colorVal = Math.floor(255 * normalized);
 
             if (colormap === 'Reds') {{
-                ctx.fillStyle = `rgb(${colorVal}, 0, 0)`;
+                ctx.fillStyle = `rgb(${{colorVal}}, 0, 0)`;
             }} else {{ // Blues
-                ctx.fillStyle = `rgb(0, 0, ${colorVal})`;
+                ctx.fillStyle = `rgb(0, 0, ${{colorVal}})`;
             }}
             // Draw bottom-up
             ctx.fillRect(x, height - 1 - y, 1, 1);
@@ -296,7 +296,7 @@ async function runAnalysis() {{
   previewEl.innerHTML = '';
   previewEl.appendChild(canvas);
   
-  metaEl.textContent = `sr=${audioBuffer.sampleRate} Hz | 时长≈${audioBuffer.duration.toFixed(2)}s | n_fft=${n_fft}, hop=${hop_length}, α=${alpha}, 动态范围=${dyn_range} dB (JS Render)`;
+  metaEl.textContent = `sr=${{audioBuffer.sampleRate}} Hz | 时长≈${{audioBuffer.duration.toFixed(2)}}s | n_fft=${{n_fft}}, hop=${{hop_length}}, α=${{alpha}}, 动态范围=${{dyn_range}} dB (JS Render)`;
   statusEl.textContent = "状态：完成";
   runBtn.disabled = false;
 }}

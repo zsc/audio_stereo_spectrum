@@ -8,6 +8,7 @@ matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import librosa
 import librosa.display
+import json
 
 # --- Default Parameters for Initial Generation ---
 DEFAULT_N_FFT = 2048
@@ -15,6 +16,7 @@ DEFAULT_HOP_LENGTH = 512
 DEFAULT_ALPHA = 0.55
 DEFAULT_DYN_RANGE_DB = 80
 MAX_FILE_MB = 60 # Set a reasonable limit for embedding
+DEFAULT_N_MELS = 128
 
 # --- Matplotlib Plotting Function (from original app.py) ---
 def make_overlay_png_bytes(left: np.ndarray,
@@ -23,19 +25,20 @@ def make_overlay_png_bytes(left: np.ndarray,
                            n_fft: int,
                            hop_length: int,
                            alpha: float,
-                           dyn_range_db: float) -> bytes:
+                           dyn_range_db: float,
+                           n_mels: int) -> bytes:
     """
-    Computes and renders the stereo spectrogram overlay, returning PNG bytes.
+    Computes and renders the stereo Mel spectrogram overlay, returning PNG bytes.
     """
-    # Calculate STFT magnitude spectra
-    Sl = np.abs(librosa.stft(left, n_fft=n_fft, hop_length=hop_length))
-    Sr = np.abs(librosa.stft(right, n_fft=n_fft, hop_length=hop_length))
+    # Calculate Mel spectrograms
+    Sl = librosa.feature.melspectrogram(y=left, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels)
+    Sr = librosa.feature.melspectrogram(y=right, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels)
 
     # Use a global max for a consistent dB reference scale
     global_ref = max(np.max(Sl), np.max(Sr))
     if global_ref == 0: global_ref = 1 # Avoid division by zero for silence
-    Sl_db = librosa.amplitude_to_db(Sl, ref=global_ref)
-    Sr_db = librosa.amplitude_to_db(Sr, ref=global_ref)
+    Sl_db = librosa.power_to_db(Sl, ref=global_ref)
+    Sr_db = librosa.power_to_db(Sr, ref=global_ref)
 
     # Plotting
     fig = plt.figure(figsize=(12, 6), dpi=150)
@@ -46,16 +49,16 @@ def make_overlay_png_bytes(left: np.ndarray,
 
     # Overlay spectrograms: Left=Red, Right=Blue
     librosa.display.specshow(
-        Sl_db, x_axis="time", y_axis="linear", sr=sr, hop_length=hop_length,
+        Sl_db, x_axis="time", y_axis="mel", sr=sr, hop_length=hop_length,
         cmap="Reds", vmin=vmin, vmax=vmax, alpha=alpha, ax=ax,
     )
     librosa.display.specshow(
-        Sr_db, x_axis="time", y_axis="linear", sr=sr, hop_length=hop_length,
+        Sr_db, x_axis="time", y_axis="mel", sr=sr, hop_length=hop_length,
         cmap="Blues", vmin=vmin, vmax=vmax, alpha=alpha, ax=ax,
     )
 
-    ax.set_title(f"Stereo Spectrogram (L:Red, R:Blue) | sr={sr}, n_fft={n_fft}, hop={hop_length}")
-    ax.set_ylabel("Frequency (Hz)")
+    ax.set_title(f"Stereo Mel Spectrogram (L:Red, R:Blue) | sr={sr}, n_fft={n_fft}, hop={hop_length}, n_mels={n_mels}")
+    ax.set_ylabel("Frequency (Mel)")
     ax.set_xlabel("Time (s)")
     ax.grid(True, linestyle=":", linewidth=0.4, alpha=0.5)
 
@@ -73,7 +76,7 @@ HTML_TEMPLATE = """
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <title>双声道频谱叠加可视化 - {filename}</title>
+  <title>双声道梅尔频谱叠加可视化 - {filename}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {{ --bg:#0b0d12; --card:#11161d; --muted:#a3b1c6; --text:#e8eef8; --accent:#4da3ff; --danger:#ff5d7a; --border:#263142; }}
@@ -100,7 +103,7 @@ HTML_TEMPLATE = """
   </style>
 </head>
 <body>
-  <header><h1>双声道频谱叠加可视化（L=红 / R=蓝）</h1></header>
+  <header><h1>双声道梅尔频谱叠加可视化（L=红 / R=蓝）</h1></header>
 
   <div class="wrap">
     <div class="card">
@@ -136,7 +139,7 @@ HTML_TEMPLATE = """
       </div>
 
       <div class="sp"></div>
-      <div class="preview" id="preview"><img src="{initial_image_url}" alt="Initial Spectrogram"></div>
+      <div class="preview" id="preview"><img src="{initial_image_url}" alt="Initial Mel Spectrogram"></div>
       <div class="footer" style="margin-top:12px">
         <span id="status" class="pill">状态：已加载</span>
         <span id="meta" class="meta"></span>
@@ -145,6 +148,7 @@ HTML_TEMPLATE = """
     </div>
   </div>
 
+<script>const MEL_FILTERBANK = {mel_filterbank_json};</script>
 <script>
 // --- Embedded Audio Data ---
 const AUDIO_DATA_URL = "{audio_data_url}";
@@ -161,6 +165,43 @@ const previewEl = document.getElementById("preview");
 const metaEl = document.getElementById("meta");
 const statusEl = document.getElementById("status");
 const player = document.getElementById("player");
+let indicatorCanvas = null;
+let animationFrameId = null;
+
+
+// --- Playback Indicator ---
+function drawIndicator() {{
+    if (!indicatorCanvas || !player.duration) return;
+    const indicatorCtx = indicatorCanvas.getContext('2d');
+    const canvasWidth = indicatorCanvas.width;
+    const canvasHeight = indicatorCanvas.height;
+    
+    indicatorCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+    const x = (player.currentTime / player.duration) * canvasWidth;
+
+    // Draw a more visible line
+    indicatorCtx.fillStyle = 'rgba(255, 0, 0, 0.8)'; // Red, more opaque
+    indicatorCtx.fillRect(x - 1, 0, 3, canvasHeight); // 3px wide, centered
+
+    animationFrameId = requestAnimationFrame(drawIndicator);
+}}
+
+player.addEventListener('play', () => {{
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    animationFrameId = requestAnimationFrame(drawIndicator);
+}});
+player.addEventListener('pause', () => {{
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+}});
+player.addEventListener('ended', () => {{
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+    if (indicatorCanvas) {{
+        const indicatorCtx = indicatorCanvas.getContext('2d');
+        indicatorCtx.clearRect(0, 0, indicatorCanvas.width, indicatorCanvas.height);
+    }}
+}});
 
 // --- Web Audio API Analysis ---
 async function decodeAudio() {{
@@ -195,14 +236,15 @@ async function getSpectrogramData(channelData, n_fft, hop_length) {{
     const totalSamples = channelData.length;
     const frames = [];
     const window = hannWindow(n_fft);
+    const n_mels = MEL_FILTERBANK.length;
+    const fft_bins = MEL_FILTERBANK[0].length;
 
-    // Offline context is perfect for non-realtime processing
     const offlineCtx = new OfflineAudioContext(1, n_fft, audioBuffer.sampleRate);
     const analyser = offlineCtx.createAnalyser();
     analyser.fftSize = n_fft;
-    analyser.smoothingTimeConstant = 0; // No smoothing
+    analyser.smoothingTimeConstant = 0;
 
-    const freqData = new Float32Array(analyser.frequencyBinCount);
+    const freqDataDb = new Float32Array(analyser.frequencyBinCount);
 
     for (let i = 0; i + n_fft <= totalSamples; i += hop_length) {{
         const buffer = offlineCtx.createBuffer(1, n_fft, audioBuffer.sampleRate);
@@ -219,8 +261,25 @@ async function getSpectrogramData(channelData, n_fft, hop_length) {{
         source.start(0);
 
         await offlineCtx.startRendering();
-        analyser.getFloatFrequencyData(freqData);
-        frames.push(new Float32Array(freqData)); // Copy data for this frame
+        analyser.getFloatFrequencyData(freqDataDb);
+
+        const powerSpec = new Float32Array(fft_bins);
+        for (let k = 0; k < fft_bins; k++) {{
+            powerSpec[k] = Math.pow(10, freqDataDb[k] / 10);
+        }}
+
+        const melSpec = new Float32Array(n_mels).fill(0);
+        for (let m = 0; m < n_mels; m++) {{
+            for (let k = 0; k < fft_bins; k++) {{
+                melSpec[m] += MEL_FILTERBANK[m][k] * powerSpec[k];
+            }}
+        }}
+
+        const melSpecDb = new Float32Array(n_mels);
+        for (let m = 0; m < n_mels; m++) {{
+            melSpecDb[m] = 10 * Math.log10(melSpec[m] + 1e-6);
+        }}
+        frames.push(melSpecDb);
     }}
     return frames;
 }}
@@ -279,24 +338,39 @@ async function runAnalysis() {{
 
   statusEl.textContent = "状态：渲染中...";
 
-  // Prepare canvas
+  // Prepare spectrogram canvas
   const canvas = document.createElement('canvas');
   const numFrames = specL.length > 0 ? specL.length : 800;
-  const freqBins = specL.length > 0 ? specL[0].length : n_fft / 2;
+  const freqBins = MEL_FILTERBANK.length;
   canvas.width = numFrames;
   canvas.height = freqBins;
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#0a0f16'; // background
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Draw
+  // Draw spectrograms
   drawSpectrogram(ctx, specL, audioBuffer.sampleRate, n_fft, alpha, dyn_range, 'Reds');
   drawSpectrogram(ctx, specR, audioBuffer.sampleRate, n_fft, alpha, dyn_range, 'Blues');
 
+  // Set up container for canvases
   previewEl.innerHTML = '';
-  previewEl.appendChild(canvas);
+  const container = document.createElement('div');
+  container.style.position = 'relative';
+  container.style.lineHeight = '0';
+  previewEl.appendChild(container);
+  container.appendChild(canvas);
+
+  // Create and add indicator canvas
+  indicatorCanvas = document.createElement('canvas');
+  indicatorCanvas.width = canvas.width;
+  indicatorCanvas.height = canvas.height;
+  indicatorCanvas.style.position = 'absolute';
+  indicatorCanvas.style.top = '0';
+  indicatorCanvas.style.left = '0';
+  indicatorCanvas.style.pointerEvents = 'none';
+  container.appendChild(indicatorCanvas);
   
-  metaEl.textContent = `sr=${{audioBuffer.sampleRate}} Hz | 时长≈${{audioBuffer.duration.toFixed(2)}}s | n_fft=${{n_fft}}, hop=${{hop_length}}, α=${{alpha}}, 动态范围=${{dyn_range}} dB (JS Render)`;
+  metaEl.textContent = `sr=${{audioBuffer.sampleRate}} Hz | 时长≈${{audioBuffer.duration.toFixed(2)}}s | n_fft=${{n_fft}}, hop=${{hop_length}}, n_mels=${{MEL_FILTERBANK.length}}, α=${{alpha}}, 动态范围=${{dyn_range}} dB (JS Render)`;
   statusEl.textContent = "状态：完成";
   runBtn.disabled = false;
 }}
@@ -304,7 +378,7 @@ async function runAnalysis() {{
 runBtn.addEventListener("click", runAnalysis);
 
 // Initialize
-metaEl.textContent = `sr={sr} Hz | 时长≈{duration}s | n_fft={n_fft}, hop={hop_length}, α={alpha}, 动态范围={dyn_range} dB (Initial Render)`;
+metaEl.textContent = `sr={sr} Hz | 时长≈{duration}s | n_fft={n_fft}, hop={hop_length}, n_mels={n_mels}, α={alpha}, 动态范围={dyn_range} dB (Initial Render)`;
 
 </script>
 </body>
@@ -313,7 +387,7 @@ metaEl.textContent = `sr={sr} Hz | 时长≈{duration}s | n_fft={n_fft}, hop={ho
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate a single-file HTML for stereo spectrogram visualization.",
+        description="Generate a single-file HTML for stereo Mel spectrogram visualization.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("-i", "--input", required=True, help="Path to the input audio file (.wav, .mp3).")
@@ -352,7 +426,8 @@ def main():
             n_fft=DEFAULT_N_FFT,
             hop_length=DEFAULT_HOP_LENGTH,
             alpha=DEFAULT_ALPHA,
-            dyn_range_db=DEFAULT_DYN_RANGE_DB
+            dyn_range_db=DEFAULT_DYN_RANGE_DB,
+            n_mels=DEFAULT_N_MELS
         )
         initial_image_b64 = base64.b64encode(png_bytes).decode('ascii')
         initial_image_url = f"data:image/png;base64,{initial_image_b64}"
@@ -367,7 +442,6 @@ def main():
             audio_bytes = f_audio.read()
         audio_b64 = base64.b64encode(audio_bytes).decode('ascii')
         
-        # Determine MIME type for the data URL
         file_ext = os.path.splitext(args.input.lower())[1]
         mime_type = "audio/mpeg" if file_ext == ".mp3" else "audio/wav"
         audio_data_url = f"data:{mime_type};base64,{audio_b64}"
@@ -375,7 +449,11 @@ def main():
         print(f"Error embedding audio file: {e}")
         return
 
-    # --- 5. Populate and Write HTML File ---
+    # --- 5. Generate Mel Filterbank for JS ---
+    mel_filterbank = librosa.filters.mel(sr=sr, n_fft=DEFAULT_N_FFT, n_mels=DEFAULT_N_MELS)
+    mel_filterbank_json = json.dumps(mel_filterbank.tolist())
+
+    # --- 6. Populate and Write HTML File ---
     print(f"Writing to '{args.output}'...")
     final_html = HTML_TEMPLATE.format(
         filename=os.path.basename(args.input),
@@ -387,7 +465,8 @@ def main():
         hop_length=DEFAULT_HOP_LENGTH,
         alpha=DEFAULT_ALPHA,
         dyn_range=DEFAULT_DYN_RANGE_DB,
-        # Set default selected options in dropdowns
+        n_mels=DEFAULT_N_MELS,
+        mel_filterbank_json=mel_filterbank_json,
         nfft_2048_selected='selected' if DEFAULT_N_FFT == 2048 else '',
         hop_512_selected='selected' if DEFAULT_HOP_LENGTH == 512 else '',
     )
